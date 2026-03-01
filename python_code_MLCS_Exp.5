@@ -1,0 +1,448 @@
+PREREQUISITE:
+    - phishing.csv  (Kaggle Phishing Dataset, 11054 samples)
+    - Place phishing.csv in the same folder as this script
+
+OUTPUTS (7 graphs saved as PNG):
+    exp5_01_kmeans_clustering.png
+    exp5_02_cluster_analysis.png
+    exp5_03_accuracy_f1.png
+    exp5_04_roc_curves.png
+    exp5_05_confusion_matrices.png
+    exp5_06_extended_analysis.png
+    exp5_07_rf_feature_learning.png
+
+MODELS USED:
+    Unsupervised : K-Means Clustering (k=6)
+    Supervised   : Random Forest, Gradient Boosting,
+                   Logistic Regression, Decision Tree, SVM
+=============================================================
+"""
+
+# ─── Imports ───────────────────────────────────────────────
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.svm import SVC
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, learning_curve
+from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
+                             confusion_matrix, roc_curve)
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+
+# ─────────────────────────────────────────────────────────────
+# STEP 1: LOAD & CLEAN DATASET (from Experiment 4)
+# ─────────────────────────────────────────────────────────────
+print("="*60)
+print("EXPERIMENT 5: PHISHING URL ML COMPARISON")
+print("="*60)
+
+df = pd.read_csv('phishing.csv')
+df = df.drop(columns=['Index'], errors='ignore')
+df = df.drop_duplicates()
+
+# Binary label: -1 (phishing) → 0,  +1 (legitimate) → 1
+df['class_binary'] = df['class'].apply(lambda x: 0 if x == -1 else 1)
+
+FEATURE_COLS = [c for c in df.columns if c not in ['class', 'class_binary']]
+phishing_df  = df[df['class'] == -1].copy().reset_index(drop=True)
+
+print(f"\nDataset loaded: {len(df)} samples | "
+      f"Phishing: {(df['class_binary']==0).sum()} | "
+      f"Legitimate: {(df['class_binary']==1).sum()}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 2: NOVEL ATTACK TYPE TAXONOMY (from Experiment 4)
+#         Used for subgroup performance analysis in Graph 6
+# ─────────────────────────────────────────────────────────────
+def assign_attack_type(row):
+    """
+    Rule-based mapping of phishing URL features to 6 attack subtypes.
+    Each subtype is identified by the combination of features it activates.
+    """
+    score = {
+        'IP-Based\n(Pharming)':       int(row['UsingIP']==1)
+                                    + int(row['AbnormalURL']==1)
+                                    + int(row['DNSRecording']==-1),
+
+        'HTTPS Spoofing\n(Clone)':    int(row['HTTPS']==-1)
+                                    + int(row['HTTPSDomainURL']==-1)
+                                    + int(row['Favicon']==1),
+
+        'Redirection\n(Watering Hole)': int(row['Redirecting//']==1)
+                                      + int(row['WebsiteForwarding']==1)
+                                      + int(row['IframeRedirection']==1),
+
+        'URL Obfuscation\n(Typosquatting)': int(row['LongURL']==1)
+                                          + int(row['PrefixSuffix-']==-1)
+                                          + int(row['SubDomains']==1)
+                                          + int(row['ShortURL']==1),
+
+        'Social Engineering\n(Spear)': int(row['AnchorURL']==-1)
+                                     + int(row['InfoEmail']==1)
+                                     + int(row['RequestURL']==-1)
+                                     + int(row['ServerFormHandler']==-1),
+
+        'SEO Poisoning\n(Search Engine)': int(row['GoogleIndex']==-1)
+                                        + int(row['WebsiteTraffic']==-1)
+                                        + int(row['PageRank']==-1)
+                                        + int(row['StatsReport']==-1),
+    }
+    best = max(score, key=score.get)
+    return best if score[best] > 0 else 'SEO Poisoning\n(Search Engine)'
+
+phishing_df['attack_type'] = phishing_df.apply(assign_attack_type, axis=1)
+attack_types_all = list(phishing_df['attack_type'].unique())
+print(f"\nAttack type counts:\n{phishing_df['attack_type'].value_counts()}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 3: TRAIN / TEST SPLIT & SCALING
+# ─────────────────────────────────────────────────────────────
+X = df[FEATURE_COLS].values
+y = df['class_binary'].values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+
+scaler      = StandardScaler()
+X_train_sc  = scaler.fit_transform(X_train)
+X_test_sc   = scaler.transform(X_test)
+
+print(f"\nTrain: {len(X_train)} | Test: {len(X_test)}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 4: UNSUPERVISED MODEL — K-Means Clustering
+# ─────────────────────────────────────────────────────────────
+print("\nTraining K-Means (k=6)...")
+kmeans    = KMeans(n_clusters=6, random_state=42, n_init=10)
+km_labels = kmeans.fit_predict(X_train_sc)
+
+from sklearn.metrics import silhouette_score
+sil = silhouette_score(X_train_sc, km_labels)
+print(f"Silhouette Score: {sil:.4f}")
+
+# PCA (2D) for visualization
+pca   = PCA(n_components=2, random_state=42)
+X_pca = pca.fit_transform(X_train_sc)
+
+# Elbow curve data
+inertias = []
+K_range  = range(2, 12)
+for k in K_range:
+    km_temp = KMeans(n_clusters=k, random_state=42, n_init=5)
+    km_temp.fit(X_train_sc[:2000])          # subset for speed
+    inertias.append(km_temp.inertia_)
+
+# ─────────────────────────────────────────────────────────────
+# STEP 5: SUPERVISED MODELS
+# ─────────────────────────────────────────────────────────────
+print("\nTraining supervised models...")
+MODELS = {
+    'Random Forest':      RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+    'Gradient Boosting':  GradientBoostingClassifier(n_estimators=100, random_state=42),
+    'Logistic Regression':LogisticRegression(max_iter=1000, random_state=42),
+    'Decision Tree':      DecisionTreeClassifier(random_state=42),
+    'SVM':                SVC(probability=True, kernel='rbf', C=1.0, random_state=42),
+}
+
+results = {}
+for name, model in MODELS.items():
+    model.fit(X_train_sc, y_train)
+    y_pred  = model.predict(X_test_sc)
+    y_proba = (model.predict_proba(X_test_sc)[:, 1]
+               if hasattr(model, 'predict_proba') else y_pred)
+    results[name] = {
+        'accuracy': accuracy_score(y_test, y_pred),
+        'f1':       f1_score(y_test, y_pred),
+        'auc':      roc_auc_score(y_test, y_proba),
+        'cm':       confusion_matrix(y_test, y_pred),
+        'y_pred':   y_pred,
+        'y_proba':  y_proba,
+    }
+    print(f"  {name:22s}: "
+          f"Acc={results[name]['accuracy']:.4f}  "
+          f"F1={results[name]['f1']:.4f}  "
+          f"AUC={results[name]['auc']:.4f}")
+
+# ─────────────────────────────────────────────────────────────
+# COLOUR PALETTE (consistent across all graphs)
+# ─────────────────────────────────────────────────────────────
+PALETTE       = ['#FF6B6B', '#FFB347', '#87CEEB', '#98FB98', '#DDA0DD']
+CLUSTER_COLS  = ['#FF6B6B', '#FFB347', '#87CEEB', '#98FB98', '#DDA0DD', '#F0E68C']
+MODEL_NAMES   = list(results.keys())
+SHORT_NAMES   = ['RF', 'GB', 'LR', 'DT', 'SVM']
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 1: K-Means — PCA Scatter + Elbow Curve           ║
+# ╚══════════════════════════════════════════════════════════╝
+print("\nGenerating Graph 1: K-Means Clustering...")
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle('Unsupervised Learning: K-Means Clustering', fontweight='bold', fontsize=13)
+
+# Left — PCA scatter coloured by cluster
+ax = axes[0]
+for c in range(6):
+    mask = km_labels == c
+    ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+               c=CLUSTER_COLS[c], s=5, alpha=0.5, label=f'Cluster {c+1}')
+ax.set_title('K-Means Clusters (PCA Projection)\n6 Clusters → Attack Subtypes', fontsize=10)
+ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
+ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
+ax.legend(markerscale=3, fontsize=8)
+ax.grid(True, alpha=0.3)
+ax.text(0.02, 0.98, f'Silhouette Score: {sil:.4f}',
+        transform=ax.transAxes, fontsize=9, verticalalignment='top',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+# Right — Elbow curve
+ax = axes[1]
+ax.plot(list(K_range), inertias, 'bo-', linewidth=2, markersize=6)
+ax.axvline(x=6, color='red', linestyle='--', alpha=0.7, label='Chosen k=6\n(Attack Types)')
+ax.set_xlabel('Number of Clusters (k)')
+ax.set_ylabel('Inertia')
+ax.set_title('Elbow Curve for Optimal k', fontsize=10)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('exp5_01_kmeans_clustering.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_01_kmeans_clustering.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 2: Cluster Composition vs Ground Truth           ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 2: Cluster Analysis...")
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle('K-Means: Cluster Analysis vs Ground Truth', fontweight='bold', fontsize=13)
+
+# Left — PCA scatter coloured by true label
+ax = axes[0]
+ax.scatter(X_pca[:, 0], X_pca[:, 1],
+           c=['#FF6B6B' if l == 0 else '#4ECDC4' for l in y_train],
+           s=5, alpha=0.4)
+ax.set_title('True Class Labels in PCA Space\n(Red=Phishing, Teal=Legitimate)', fontsize=10)
+ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
+ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
+red_patch  = mpatches.Patch(color='#FF6B6B', label='Phishing')
+teal_patch = mpatches.Patch(color='#4ECDC4', label='Legitimate')
+ax.legend(handles=[red_patch, teal_patch], fontsize=9)
+ax.grid(True, alpha=0.3)
+
+# Right — Cluster composition stacked bar
+ax = axes[1]
+comp = (pd.DataFrame({'Cluster': km_labels, 'Label': y_train})
+          .groupby(['Cluster', 'Label']).size().unstack(fill_value=0))
+comp.columns = ['Phishing', 'Legitimate']
+(comp.div(comp.sum(axis=1), axis=0) * 100).plot(
+    kind='bar', stacked=True, ax=ax, color=['#FF6B6B', '#4ECDC4'])
+ax.set_title('Cluster Composition\n(% Phishing vs Legitimate per Cluster)', fontsize=10)
+ax.set_xlabel('Cluster')
+ax.set_ylabel('Percentage (%)')
+ax.legend()
+ax.grid(axis='y', alpha=0.3)
+ax.tick_params(axis='x', rotation=0)
+
+plt.tight_layout()
+plt.savefig('exp5_02_cluster_analysis.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_02_cluster_analysis.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 3: Accuracy & F1-Score Comparison                ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 3: Accuracy & F1...")
+accs = [results[m]['accuracy'] for m in MODEL_NAMES]
+f1s  = [results[m]['f1']       for m in MODEL_NAMES]
+aucs = [results[m]['auc']      for m in MODEL_NAMES]
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+fig.suptitle('Supervised Model Performance Comparison', fontweight='bold', fontsize=13)
+
+for ax, vals, label in zip(axes, [accs, f1s], ['Accuracy', 'F1-Score']):
+    bars = ax.bar(SHORT_NAMES, vals, color=PALETTE, edgecolor='white', linewidth=1.2)
+    for bar, val in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.002,
+                f'{val:.4f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax.set_ylim(0.85, 1.01)
+    ax.set_ylabel(label)
+    ax.set_title(f'{label} Comparison')
+    ax.grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('exp5_03_accuracy_f1.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_03_accuracy_f1.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 4: ROC Curves — All Supervised Models            ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 4: ROC Curves...")
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.set_title('ROC Curves – All Supervised Models', fontweight='bold', fontsize=12)
+
+for i, (name, res) in enumerate(results.items()):
+    fpr, tpr, _ = roc_curve(y_test, res['y_proba'])
+    ax.plot(fpr, tpr, color=PALETTE[i], linewidth=2,
+            label=f'{name} (AUC={res["auc"]:.4f})')
+
+ax.plot([0,1], [0,1], 'k--', lw=1, label='Random')
+ax.set_xlabel('False Positive Rate')
+ax.set_ylabel('True Positive Rate')
+ax.legend(fontsize=9, loc='lower right')
+ax.grid(True, alpha=0.3)
+ax.set_xlim([0, 1])
+ax.set_ylim([0, 1.02])
+
+plt.tight_layout()
+plt.savefig('exp5_04_roc_curves.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_04_roc_curves.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 5: Confusion Matrices — Top 3 Models             ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 5: Confusion Matrices...")
+TOP3  = ['Random Forest', 'Gradient Boosting', 'SVM']
+CMAPS = ['Reds', 'Blues', 'Greens']
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+fig.suptitle('Confusion Matrices – Top 3 Models', fontweight='bold', fontsize=13)
+
+for idx, name in enumerate(TOP3):
+    ax = axes[idx]
+    sns.heatmap(results[name]['cm'], annot=True, fmt='d',
+                cmap=CMAPS[idx], ax=ax, linewidths=0.5,
+                xticklabels=['Phishing', 'Legitimate'],
+                yticklabels=['Phishing', 'Legitimate'])
+    ax.set_title(f'{name}\nAcc={results[name]["accuracy"]:.4f}', fontsize=10)
+    ax.set_ylabel('True')
+    ax.set_xlabel('Predicted')
+
+plt.tight_layout()
+plt.savefig('exp5_05_confusion_matrices.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_05_confusion_matrices.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 6: All Metrics + Novel Attack-Type Detection Rate ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 6: Extended Analysis...")
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle('Extended Model Analysis', fontweight='bold', fontsize=13)
+
+# Left — All 3 metrics side by side
+ax = axes[0]
+x = np.arange(len(MODEL_NAMES))
+w = 0.25
+ax.bar(x - w, accs, w, label='Accuracy',  color='#FF6B6B', alpha=0.85)
+ax.bar(x,     f1s,  w, label='F1-Score',  color='#4ECDC4', alpha=0.85)
+ax.bar(x + w, aucs, w, label='AUC-ROC',   color='#FFB347', alpha=0.85)
+ax.set_xticks(x)
+ax.set_xticklabels(SHORT_NAMES)
+ax.set_ylabel('Score')
+ax.set_title('All Metrics per Model', fontsize=10)
+ax.legend(fontsize=9)
+ax.set_ylim(0.80, 1.02)
+ax.grid(axis='y', alpha=0.3)
+for xi in range(len(MODEL_NAMES)):
+    for di, vals in enumerate([accs, f1s, aucs]):
+        ax.text(xi + (di-1)*w, vals[xi] + 0.002,
+                f'{vals[xi]:.3f}', ha='center', va='bottom', fontsize=7)
+
+# Right — Novel: RF detection rate per attack subtype
+ax = axes[1]
+rf_model = MODELS['Random Forest']
+type_acc  = {}
+for at in phishing_df['attack_type'].unique():
+    mask  = phishing_df['attack_type'] == at
+    at_X  = scaler.transform(phishing_df[mask][FEATURE_COLS].values)
+    preds = rf_model.predict(at_X)
+    type_acc[at.replace('\n', ' ')] = (preds == 0).mean() * 100  # % detected as phishing
+
+bars = ax.barh(list(type_acc.keys()), list(type_acc.values()),
+               color=CLUSTER_COLS[:len(type_acc)])
+ax.set_xlabel('Detection Rate (%)')
+ax.set_title('RF Detection Rate by\nAttack Subtype (Novel)', fontsize=10)
+ax.set_xlim(0, 107)
+for i, (k, v) in enumerate(type_acc.items()):
+    ax.text(v + 0.5, i, f'{v:.1f}%', va='center', fontsize=9)
+ax.grid(axis='x', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('exp5_06_extended_analysis.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_06_extended_analysis.png")
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  GRAPH 7: RF Feature Importance + Learning Curve        ║
+# ╚══════════════════════════════════════════════════════════╝
+print("Generating Graph 7: RF Feature Importance & Learning Curve...")
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle('Random Forest: Feature Importance & Learning Curve',
+             fontweight='bold', fontsize=13)
+
+# Left — Feature importances
+ax    = axes[0]
+rf    = MODELS['Random Forest']
+fimp  = pd.Series(rf.feature_importances_, index=FEATURE_COLS).nlargest(10)
+ax.barh(fimp.index[::-1], fimp.values[::-1], color='#FF6B6B', edgecolor='white')
+ax.set_xlabel('Importance')
+ax.set_title('Top 10 Feature Importances\n(Random Forest)', fontsize=10)
+ax.grid(axis='x', alpha=0.3)
+for i, (idx, val) in enumerate(zip(fimp.index[::-1], fimp.values[::-1])):
+    ax.text(val + 0.001, i, f'{val:.4f}', va='center', fontsize=8)
+
+# Right — Learning curve
+ax = axes[1]
+train_sz, train_sc, val_sc = learning_curve(
+    RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1),
+    X_train_sc, y_train,
+    cv=3, train_sizes=np.linspace(0.1, 1.0, 8),
+    scoring='accuracy', n_jobs=-1)
+
+t_mean, t_std = train_sc.mean(axis=1), train_sc.std(axis=1)
+v_mean, v_std = val_sc.mean(axis=1),   val_sc.std(axis=1)
+
+ax.plot(train_sz, t_mean, 'o-', color='#FF6B6B', label='Training Score',   linewidth=2)
+ax.plot(train_sz, v_mean, 's-', color='#4ECDC4', label='Validation Score', linewidth=2)
+ax.fill_between(train_sz, t_mean - t_std, t_mean + t_std, alpha=0.1, color='#FF6B6B')
+ax.fill_between(train_sz, v_mean - v_std, v_mean + v_std, alpha=0.1, color='#4ECDC4')
+ax.set_xlabel('Training Samples')
+ax.set_ylabel('Accuracy')
+ax.set_title('Learning Curve (Random Forest)', fontsize=10)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+ax.set_ylim(0.88, 1.01)
+
+plt.tight_layout()
+plt.savefig('exp5_07_rf_feature_learning.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("  ✓ Saved: exp5_07_rf_feature_learning.png")
+
+# ─────────────────────────────────────────────────────────────
+# FINAL SUMMARY
+# ─────────────────────────────────────────────────────────────
+print("\n" + "="*60)
+print("FINAL RESULTS SUMMARY")
+print("="*60)
+print(f"\n{'Model':<22} {'Accuracy':>10} {'F1-Score':>10} {'AUC-ROC':>10}")
+print("-"*55)
+for name, res in results.items():
+    print(f"{name:<22} {res['accuracy']:>10.4f} {res['f1']:>10.4f} {res['auc']:>10.4f}")
+print(f"\n{'K-Means (Unsupervised)':<22} {'N/A':>10} {'N/A':>10} {'N/A':>10}")
+print(f"  Silhouette Score: {sil:.4f}")
+print("\nAll 7 graphs saved successfully!")
+print("="*60)
