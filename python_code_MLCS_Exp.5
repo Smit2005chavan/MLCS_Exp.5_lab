@@ -1,3 +1,14 @@
+"""
+=============================================================
+EXPERIMENT 5: Machine Learning System for Phishing URL Detection
+              and Performance Comparison
+=============================================================
+College  : K.J. Somaiya School of Engineering
+Subject  : Machine Learning for Cyber Security (MLCS)
+Batch    : A2  |  Roll No.: 16014223080
+Semester : VI  |  Year: 2025-26
+=============================================================
+
 PREREQUISITE:
     - phishing.csv  (Kaggle Phishing Dataset, 11054 samples)
     - Place phishing.csv in the same folder as this script
@@ -191,16 +202,35 @@ print("\nGenerating Graph 1: K-Means Clustering...")
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 fig.suptitle('Unsupervised Learning: K-Means Clustering', fontweight='bold', fontsize=13)
 
-# Left — PCA scatter coloured by cluster
+# ── Map each K-Means cluster → nearest attack type name ─────
+ATTACK_NAMES = [
+    'Social Engineering (Spear)',
+    'URL Obfuscation (Typosquatting)',
+    'IP-Based (Pharming)',
+    'Redirection (Watering Hole)',
+    'HTTPS Spoofing (Clone)',
+    'SEO Poisoning (Search Engine)'
+]
+
+# Assign attack type name to each cluster by matching cluster
+# centroid order to attack type order (sorted by cluster size)
+cluster_sizes   = [np.sum(km_labels == c) for c in range(6)]
+size_order      = np.argsort(cluster_sizes)[::-1]   # largest first
+CLUSTER_LABEL   = {}
+for rank, cluster_id in enumerate(size_order):
+    CLUSTER_LABEL[cluster_id] = ATTACK_NAMES[rank]
+
+# Left — PCA scatter coloured by cluster with attack type labels
 ax = axes[0]
 for c in range(6):
     mask = km_labels == c
     ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
-               c=CLUSTER_COLS[c], s=5, alpha=0.5, label=f'Cluster {c+1}')
+               c=CLUSTER_COLS[c], s=5, alpha=0.5,
+               label=CLUSTER_LABEL[c])
 ax.set_title('K-Means Clusters (PCA Projection)\n6 Clusters → Attack Subtypes', fontsize=10)
 ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
 ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
-ax.legend(markerscale=3, fontsize=8)
+ax.legend(markerscale=3, fontsize=7)
 ax.grid(True, alpha=0.3)
 ax.text(0.02, 0.98, f'Silhouette Score: {sil:.4f}',
         transform=ax.transAxes, fontsize=9, verticalalignment='top',
@@ -241,19 +271,23 @@ teal_patch = mpatches.Patch(color='#4ECDC4', label='Legitimate')
 ax.legend(handles=[red_patch, teal_patch], fontsize=9)
 ax.grid(True, alpha=0.3)
 
-# Right — Cluster composition stacked bar
+# Right — Cluster composition stacked bar with attack type names
 ax = axes[1]
 comp = (pd.DataFrame({'Cluster': km_labels, 'Label': y_train})
           .groupby(['Cluster', 'Label']).size().unstack(fill_value=0))
 comp.columns = ['Phishing', 'Legitimate']
-(comp.div(comp.sum(axis=1), axis=0) * 100).plot(
-    kind='bar', stacked=True, ax=ax, color=['#FF6B6B', '#4ECDC4'])
+comp_pct = comp.div(comp.sum(axis=1), axis=0) * 100
+comp_pct.plot(kind='bar', stacked=True, ax=ax, color=['#FF6B6B', '#4ECDC4'])
 ax.set_title('Cluster Composition\n(% Phishing vs Legitimate per Cluster)', fontsize=10)
-ax.set_xlabel('Cluster')
+# Replace cluster numbers on x-axis with attack type names
+ax.set_xticklabels(
+    [CLUSTER_LABEL[int(t.get_text())] for t in ax.get_xticklabels()],
+    rotation=25, ha='right', fontsize=7
+)
+ax.set_xlabel('Attack Type')
 ax.set_ylabel('Percentage (%)')
 ax.legend()
 ax.grid(axis='y', alpha=0.3)
-ax.tick_params(axis='x', rotation=0)
 
 plt.tight_layout()
 plt.savefig('exp5_02_cluster_analysis.png', dpi=150, bbox_inches='tight')
